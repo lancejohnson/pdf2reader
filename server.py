@@ -100,6 +100,8 @@ def worker():
 
 # ---------- Readwise webhook (reader.non_feed_document.created) ----------
 CONFIG = pathlib.Path.home() / ".config" / "pdf2reader"
+HOOK_LOCK = threading.Lock()
+HOOK_SEEN = set()
 HOOK_PORT = int(os.environ.get("PDF2READER_HOOK_PORT", "8451"))
 
 
@@ -126,8 +128,10 @@ def handle_hook(payload):
     doc_id = str(payload.get("id") or "")
     if payload.get("category") != "pdf" or not re.fullmatch(r"[0-9a-z]{20,40}", doc_id):
         return "ignored (not a pdf)"
-    if any(j.get("reader_id") == doc_id for j in job_list()):
-        return "already handled"
+    with HOOK_LOCK:  # Readwise can deliver the same event twice at once
+        if doc_id in HOOK_SEEN or any(j.get("reader_id") == doc_id for j in job_list()):
+            return "already handled"
+        HOOK_SEEN.add(doc_id)
     docs = reader_api(f"list/?id={doc_id}").get("results", [])
     if not docs or docs[0].get("category") != "pdf":
         return "ignored (not in library)"
