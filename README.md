@@ -72,6 +72,18 @@ Share → Add to Home Screen gives it an app icon.
 
 `POST /submit` accepts a raw PDF body, a multipart PDF, or a link to a PDF (form field or text body).
 
+## Automatic: convert every PDF you save to Reader
+
+`server.py` also listens on `127.0.0.1:8451` for Readwise webhooks. Expose just that port publicly
+(e.g. `tailscale funnel --bg --set-path /pdf2reader-hook http://127.0.0.1:8451`), then at
+<https://readwise.io/webhook> create a webhook for that URL with the event
+**reader.non_feed_document.created**. Put the webhook's secret in config as `webhook_secret`.
+
+For each new PDF saved from a link, it downloads the original, emails the ePub, and deletes the
+original PDF from Reader. Every event is checked against your library with your own token, so
+only your real PDFs are acted on. Uploaded PDF files are skipped: Reader's API won't hand their
+bytes back (use the Share-sheet Shortcut for those).
+
 ## Other options
 
 - `--readwise-api` — save HTML through the Reader API instead of email (text only; Reader drops

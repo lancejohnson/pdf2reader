@@ -5,6 +5,8 @@ POST /submit   a PDF (raw body or multipart field), or a link to a PDF (text bod
                Replies with one line of plain text (shown by the iOS Shortcut) and queues the job.
 GET  /         status page + upload form (add to Home Screen).
 GET  /jobs.json
+Webhook: a second listener on 127.0.0.1:8451 takes Readwise's reader.non_feed_document.created events;
+for PDFs saved from a link it queues a job and deletes the original PDF from Reader once the ePub is sent.
 
 Jobs run one at a time:  pdf2reader <pdf> --readwise  (ePub with images, emailed to Reader).
 Listen on 127.0.0.1 only; exposed to the tailnet with `tailscale serve`.
@@ -54,13 +56,13 @@ def fetch_pdf(url):
     return data, name
 
 
-def new_job(pdf, name, source):
+def new_job(pdf, name, source, reader_id=None):
     jid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
     d = DATA / jid
     d.mkdir()
     (d / "input.pdf").write_bytes(pdf)
     job = {"id": jid, "name": slug(name), "source": source, "status": "queued",
-           "created": time.time(), "message": ""}
+           "created": time.time(), "message": "", "reader_id": reader_id}
     save(job)
     WAKE.set()
     return job
@@ -87,7 +89,94 @@ def worker():
         tail = (d / "log.txt").read_text().strip().splitlines()[-3:]
         job.update(status="done" if p.returncode == 0 else "failed", finished=time.time(),
                    message=" / ".join(tail)[-400:])
+        if p.returncode == 0 and job.get("reader_id"):  # webhook job: remove the original PDF from Reader
+            try:
+                reader_api(f"delete/{job['reader_id']}/", method="DELETE")
+                job["message"] += " / original PDF deleted from Reader"
+            except Exception as e:
+                job["message"] += f" / could not delete original PDF: {e}"
         save(job)
+
+
+# ---------- Readwise webhook (reader.non_feed_document.created) ----------
+CONFIG = pathlib.Path.home() / ".config" / "pdf2reader"
+HOOK_PORT = int(os.environ.get("PDF2READER_HOOK_PORT", "8451"))
+
+
+def readwise_token():
+    tok = os.environ.get("READWISE_TOKEN") or ""
+    f = CONFIG / "readwise-token"
+    return tok or (f.read_text().strip() if f.exists() else "")
+
+
+def reader_api(path, method="GET"):
+    req = urllib.request.Request(f"https://readwise.io/api/v3/{path}", method=method,
+                                 headers={"Authorization": f"Token {readwise_token()}"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        body = r.read()
+    return json.loads(body) if body else {}
+
+
+def handle_hook(payload):
+    """Act only on PDFs that really exist in the library (looked up with our own token), so a forged
+    request can at most convert one of Lance's own PDFs. Our ePubs are category epub -> no loop."""
+    cfg = json.loads((CONFIG / "config.json").read_text()) if (CONFIG / "config.json").exists() else {}
+    if cfg.get("webhook_secret") and payload.get("secret") != cfg["webhook_secret"]:
+        return "bad secret"
+    doc_id = str(payload.get("id") or "")
+    if payload.get("category") != "pdf" or not re.fullmatch(r"[0-9a-z]{20,40}", doc_id):
+        return "ignored (not a pdf)"
+    if any(j.get("reader_id") == doc_id for j in job_list()):
+        return "already handled"
+    docs = reader_api(f"list/?id={doc_id}").get("results", [])
+    if not docs or docs[0].get("category") != "pdf":
+        return "ignored (not in library)"
+    doc = docs[0]
+    src = doc.get("source_url") or ""
+    title = doc.get("title") or "document"
+    if not src.startswith("http") or "readwise.io/reader/document_raw_content" in src:
+        jid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+        (DATA / jid).mkdir()
+        save({"id": jid, "name": slug(title), "source": src, "status": "skipped", "created": time.time(),
+              "reader_id": doc_id, "message": "Uploaded file: Reader won't hand it back. "
+              "Use the Send to Reader Shortcut for this one."})
+        return "skipped (uploaded file)"
+    pdf, name = fetch_pdf(src)
+    new_job(pdf, title or name, src, reader_id=doc_id)
+    return "queued"
+
+
+class Hook(BaseHTTPRequestHandler):
+    """Separate listener: the only thing exposed publicly (tailscale funnel)."""
+    def _ok(self, text="ok"):
+        b = text.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def log_message(self, fmt, *a):
+        pass
+
+    def do_GET(self):
+        self._ok()
+
+    def do_POST(self):
+        n = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
+        raw = self.rfile.read(n)
+        self._ok()  # always 200 fast (Readwise's "Test Endpoint" needs it); work happens after
+        try:
+            payload = json.loads(raw or b"{}")
+        except Exception:
+            return
+        def run():
+            try:
+                res = handle_hook(payload)
+            except Exception as e:
+                res = f"error: {e}"
+            sys.stderr.write(f"hook {payload.get('id')} {payload.get('category')}: {res}\n")
+        threading.Thread(target=run, daemon=True).start()
 
 
 PAGE = """<!doctype html><html><head><meta charset=utf-8>
@@ -103,7 +192,7 @@ input[type=url]{width:100%;box-sizing:border-box;font-size:16px;padding:10px;bor
 button{font-size:16px;padding:10px 16px;border:0;border-radius:10px;background:#2b6cb0;color:#fff}
 .job{background:#fff;border-radius:12px;padding:12px 14px;margin:8px 0;box-shadow:0 1px 3px #0001}
 .n{font-weight:600}.s{font-size:13px;color:#666;margin-top:3px}.m{font-size:12px;color:#888;margin-top:4px;word-break:break-word}
-.done{color:#2f855a}.failed{color:#c53030}.running{color:#b7791f}.queued{color:#666}
+.skipped{color:#975a16}.done{color:#2f855a}.failed{color:#c53030}.running{color:#b7791f}.queued{color:#666}
 </style></head><body>
 <h1>PDF &rarr; Reader</h1>
 <form method=post action=/submit enctype=multipart/form-data>
@@ -156,8 +245,9 @@ class H(BaseHTTPRequestHandler):
             return self.reply(200, icon_png(), "image/png")
         rows = []
         for j in job_list()[:30]:
-            label = {"queued": "Waiting", "running": "Converting…", "done": "In Reader", "failed": "Failed"}[j["status"]]
-            msg = f"<div class=m>{html.escape(j['message'])}</div>" if j["status"] == "failed" else ""
+            label = {"queued": "Waiting", "running": "Converting…", "done": "In Reader", "failed": "Failed",
+                     "skipped": "Skipped"}[j["status"]]
+            msg = f"<div class=m>{html.escape(j['message'])}</div>" if j["status"] in ("failed", "skipped") else ""
             rows.append(f"<div class=job><div class=n>{html.escape(j['name'])}</div>"
                         f"<div class=s><span class={j['status']}>{label}</span> · {ago(j['created'])}</div>{msg}</div>")
         self.reply(200, PAGE.replace("__JOBS__", "".join(rows) or "<p class=s>No documents yet.</p>"),
@@ -206,5 +296,6 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=worker, daemon=True).start()
+    threading.Thread(target=ThreadingHTTPServer(("127.0.0.1", HOOK_PORT), Hook).serve_forever, daemon=True).start()
     print(f"pdf2reader server on 127.0.0.1:{PORT}, jobs in {DATA}", file=sys.stderr)
     ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
