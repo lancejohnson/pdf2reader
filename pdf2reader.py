@@ -303,7 +303,7 @@ def email_epub(epub, to, title, sender):
           "shows up in Reader within a few minutes", file=sys.stderr)
 
 
-def delete_email_stub(subject, wait=360):
+def delete_email_stub(sender, sent_after, wait=360):
     """Reader saves the email itself as a 3-word 'email' document next to the ePub; remove it."""
     try:
         tok = readwise_token()
@@ -320,7 +320,10 @@ def delete_email_stub(subject, wait=360):
             res = json.loads(urllib.request.urlopen(urllib.request.Request(url, headers=hdr), timeout=30).read())
         except Exception:
             continue
-        stubs = [d for d in res.get("results", []) if (d.get("title") or "") == subject]
+        # Reader's titles for these stubs are unreliable, so match the sender and the tiny body instead
+        stubs = [d for d in res.get("results", [])
+                 if sender.lower() in (d.get("author") or "").lower() and (d.get("word_count") or 0) <= 10
+                 and d.get("created_at", "") >= sent_after]
         if stubs:
             for d in stubs:
                 urllib.request.urlopen(urllib.request.Request(
@@ -457,7 +460,7 @@ def main():
     if args.readwise:
         email_epub(epub, to, meta.get("title") or out.stem, args.sender)
         if not args.keep_stub:
-            delete_email_stub(meta.get("title") or out.stem)
+            delete_email_stub(args.sender, time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 120)))
     if args.readwise_api:
         to_readwise(out, meta, args.src, digest, args.replace)
 
