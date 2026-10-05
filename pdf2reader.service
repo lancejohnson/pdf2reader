@@ -1,0 +1,20 @@
+# systemd unit for the web service (Linux). Edit User/paths, then:
+#   sudo cp pdf2reader.service /etc/systemd/system/ && sudo systemctl enable --now pdf2reader
+#   tailscale serve --bg --https=8449 http://127.0.0.1:8450     # private to your tailnet
+[Unit]
+Description=pdf2reader - PDF to Readwise Reader (iPhone Share sheet)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/pdf2reader
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONWARNINGS=ignore
+ExecStart=/home/YOUR_USER/pdf2reader/.venv/bin/python /home/YOUR_USER/pdf2reader/server.py
+Restart=always
+RestartSec=5
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

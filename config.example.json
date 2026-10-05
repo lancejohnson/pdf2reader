@@ -1,0 +1,5 @@
+{
+  "reader_email": "yourcode@library.readwise.io",
+  "sender": "you@yourdomain.com",
+  "gmail_token_command": "gcloud auth print-access-token --impersonate-service-account=... "
+}

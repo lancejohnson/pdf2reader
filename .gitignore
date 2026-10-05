@@ -1,0 +1,8 @@
+__pycache__/
+.venv/
+*.md.bak
+*_images/
+*.epub
+/out/
+config.json
+readwise-token
